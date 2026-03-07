@@ -166,6 +166,79 @@ describe("resolveIMessageInboundDecision echo detection", () => {
 
     expect(decision.kind).toBe("dispatch");
   });
+
+  it("keeps self-chat cache scoped to configured group threads", () => {
+    const selfChatCache = createSelfChatCache();
+    const groupedCfg = {
+      channels: {
+        imessage: {
+          groups: {
+            "123": {},
+            "456": {},
+          },
+        },
+      },
+    } as OpenClawConfig;
+    const createdAt = "2026-03-02T20:58:10.649Z";
+
+    expect(
+      resolveIMessageInboundDecision({
+        cfg: groupedCfg,
+        accountId: "default",
+        message: {
+          id: 9701,
+          chat_id: 123,
+          sender: "+15555550123",
+          text: "same text",
+          created_at: createdAt,
+          is_from_me: true,
+          is_group: false,
+        },
+        opts: undefined,
+        messageText: "same text",
+        bodyText: "same text",
+        allowFrom: [],
+        groupAllowFrom: [],
+        groupPolicy: "open",
+        dmPolicy: "open",
+        storeAllowFrom: [],
+        historyLimit: 0,
+        groupHistories: new Map(),
+        echoCache: undefined,
+        selfChatCache,
+        logVerbose: undefined,
+      }),
+    ).toEqual({ kind: "drop", reason: "from me" });
+
+    const decision = resolveIMessageInboundDecision({
+      cfg: groupedCfg,
+      accountId: "default",
+      message: {
+        id: 9702,
+        chat_id: 456,
+        sender: "+15555550123",
+        text: "same text",
+        created_at: createdAt,
+        is_from_me: false,
+        is_group: false,
+      },
+      opts: undefined,
+      messageText: "same text",
+      bodyText: "same text",
+      allowFrom: [],
+      groupAllowFrom: [],
+      groupPolicy: "open",
+      dmPolicy: "open",
+      storeAllowFrom: [],
+      historyLimit: 0,
+      groupHistories: new Map(),
+      echoCache: undefined,
+      selfChatCache,
+      logVerbose: undefined,
+    });
+
+    expect(decision.kind).toBe("dispatch");
+  });
 });
 
 describe("describeIMessageEchoDropLog", () => {

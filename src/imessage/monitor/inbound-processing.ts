@@ -115,19 +115,6 @@ export function resolveIMessageInboundDecision(params: {
   const chatGuid = params.message.chat_guid ?? undefined;
   const chatIdentifier = params.message.chat_identifier ?? undefined;
   const createdAt = params.message.created_at ? Date.parse(params.message.created_at) : undefined;
-  const selfChatScope = buildIMessageEchoScope({
-    accountId: params.accountId,
-    isGroup: Boolean(params.message.is_group),
-    chatId,
-    sender,
-  });
-  if (params.message.is_from_me) {
-    params.selfChatCache?.remember(selfChatScope, {
-      text: params.bodyText,
-      createdAt,
-    });
-    return { kind: "drop", reason: "from me" };
-  }
 
   const groupIdCandidate = chatId !== undefined ? String(chatId) : undefined;
   const groupListPolicy = groupIdCandidate
@@ -150,6 +137,19 @@ export function resolveIMessageInboundDecision(params: {
     groupIdCandidate && groupListPolicy.allowlistEnabled && groupListPolicy.groupConfig,
   );
   const isGroup = Boolean(params.message.is_group) || treatAsGroupByConfig;
+  const selfChatScope = buildIMessageEchoScope({
+    accountId: params.accountId,
+    isGroup,
+    chatId,
+    sender,
+  });
+  if (params.message.is_from_me) {
+    params.selfChatCache?.remember(selfChatScope, {
+      text: params.bodyText,
+      createdAt,
+    });
+    return { kind: "drop", reason: "from me" };
+  }
   if (isGroup && !chatId) {
     return { kind: "drop", reason: "group without chat_id" };
   }
