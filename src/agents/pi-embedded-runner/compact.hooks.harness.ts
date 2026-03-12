@@ -377,10 +377,15 @@ export async function loadCompactHooksHarness(): Promise<{
     resolveChannelCapabilities: vi.fn(() => undefined),
   }));
 
-  vi.doMock("../../utils/message-channel.js", () => ({
-    INTERNAL_MESSAGE_CHANNEL: "webchat",
-    normalizeMessageChannel: vi.fn(() => undefined),
-  }));
+  vi.doMock("../../utils/message-channel.js", async () => {
+    const actual = await vi.importActual<typeof import("../../utils/message-channel.js")>(
+      "../../utils/message-channel.js",
+    );
+    return {
+      ...actual,
+      normalizeMessageChannel: vi.fn(() => undefined),
+    };
+  });
 
   vi.doMock("../pi-embedded-helpers.js", () => ({
     ensureSessionHeader: vi.fn(async () => {}),
