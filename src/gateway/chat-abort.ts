@@ -1,5 +1,6 @@
 import { isAbortRequestText } from "../auto-reply/reply/abort-primitives.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
+import type { BufferedAgentEvent } from "./server-chat-state.js";
 
 const DEFAULT_CHAT_RUN_ABORT_GRACE_MS = 60_000;
 
@@ -112,6 +113,8 @@ export type ChatAbortOps = {
   chatRunBuffers: Map<string, string>;
   chatDeltaSentAt: Map<string, number>;
   chatDeltaLastBroadcastLen: Map<string, number>;
+  agentDeltaSentAt: Map<string, number>;
+  bufferedAgentEvents: Map<string, BufferedAgentEvent>;
   chatAbortedRuns: Map<string, number>;
   removeChatRun: (
     sessionId: string,
@@ -176,6 +179,12 @@ export function abortChatRunById(
   ops.chatRunBuffers.delete(runId);
   ops.chatDeltaSentAt.delete(runId);
   ops.chatDeltaLastBroadcastLen.delete(runId);
+  ops.agentDeltaSentAt.delete(runId);
+  ops.agentDeltaSentAt.delete(`${runId}:assistant`);
+  ops.agentDeltaSentAt.delete(`${runId}:thinking`);
+  ops.bufferedAgentEvents.delete(runId);
+  ops.bufferedAgentEvents.delete(`${runId}:assistant`);
+  ops.bufferedAgentEvents.delete(`${runId}:thinking`);
   const removed = ops.removeChatRun(runId, runId, sessionKey);
   broadcastChatAborted(ops, { runId, sessionKey, stopReason, partialText });
   emitAgentEvent({

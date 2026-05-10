@@ -41,7 +41,11 @@ function createMaintenanceTimerDeps() {
     logHealth: { error: () => {} },
     dedupe: new Map(),
     chatAbortControllers: new Map(),
-    chatRunState: { abortedRuns: new Map() },
+    chatRunState: {
+      abortedRuns: new Map(),
+      agentDeltaSentAt: new Map(),
+      bufferedAgentEvents: new Map(),
+    },
     chatRunBuffers: new Map(),
     chatDeltaSentAt: new Map(),
     chatDeltaLastBroadcastLen: new Map(),
@@ -205,6 +209,33 @@ describe("startGatewayMaintenanceTimers", () => {
     stopMaintenanceTimers(timers);
   });
 
+  it("sweeps orphaned stale agent throttle state once the abort controller is gone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const runId = "run-agent-orphaned";
+    deps.chatRunState.agentDeltaSentAt.set(runId, Date.now() - ABORTED_RUN_TTL_MS - 1);
+    deps.chatRunState.bufferedAgentEvents.set(runId, {
+      payload: {
+        runId,
+        seq: 1,
+        stream: "assistant",
+        ts: Date.now(),
+        data: { text: "buffer", delta: "buffer" },
+      },
+    });
+
+    const timers = startGatewayMaintenanceTimers(deps);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(deps.chatRunState.agentDeltaSentAt.has(runId)).toBe(false);
+    expect(deps.chatRunState.bufferedAgentEvents.has(runId)).toBe(false);
+
+    stopMaintenanceTimers(timers);
+  });
+
   it("clears deltaLastBroadcastLen when aborted runs age out", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
@@ -215,6 +246,16 @@ describe("startGatewayMaintenanceTimers", () => {
     deps.chatRunBuffers.set(runId, "buffer");
     deps.chatDeltaSentAt.set(runId, Date.now() - ABORTED_RUN_TTL_MS - 1);
     deps.chatDeltaLastBroadcastLen.set(runId, 6);
+    deps.chatRunState.agentDeltaSentAt.set(runId, Date.now() - ABORTED_RUN_TTL_MS - 1);
+    deps.chatRunState.bufferedAgentEvents.set(runId, {
+      payload: {
+        runId,
+        seq: 1,
+        stream: "assistant",
+        ts: Date.now(),
+        data: { text: "buffer", delta: "buffer" },
+      },
+    });
 
     const timers = startGatewayMaintenanceTimers(deps);
 
@@ -224,6 +265,8 @@ describe("startGatewayMaintenanceTimers", () => {
     expect(deps.chatRunBuffers.has(runId)).toBe(false);
     expect(deps.chatDeltaSentAt.has(runId)).toBe(false);
     expect(deps.chatDeltaLastBroadcastLen.has(runId)).toBe(false);
+    expect(deps.chatRunState.agentDeltaSentAt.has(runId)).toBe(false);
+    expect(deps.chatRunState.bufferedAgentEvents.has(runId)).toBe(false);
 
     stopMaintenanceTimers(timers);
   });
