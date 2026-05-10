@@ -479,6 +479,8 @@ function createChatContext(): Pick<
   | "chatRunBuffers"
   | "chatDeltaSentAt"
   | "chatDeltaLastBroadcastLen"
+  | "agentDeltaSentAt"
+  | "bufferedAgentEvents"
   | "chatAbortedRuns"
   | "addChatRun"
   | "removeChatRun"
@@ -495,6 +497,8 @@ function createChatContext(): Pick<
     chatRunBuffers: new Map(),
     chatDeltaSentAt: new Map(),
     chatDeltaLastBroadcastLen: new Map(),
+    agentDeltaSentAt: new Map(),
+    bufferedAgentEvents: new Map(),
     chatAbortedRuns: new Map(),
     addChatRun: vi.fn(),
     removeChatRun: vi.fn(),

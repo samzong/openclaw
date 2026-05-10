@@ -1494,6 +1494,8 @@ function createChatAbortOps(context: GatewayRequestContext): ChatAbortOps {
     chatRunBuffers: context.chatRunBuffers,
     chatDeltaSentAt: context.chatDeltaSentAt,
     chatDeltaLastBroadcastLen: context.chatDeltaLastBroadcastLen,
+    agentDeltaSentAt: context.agentDeltaSentAt,
+    bufferedAgentEvents: context.bufferedAgentEvents,
     chatAbortedRuns: context.chatAbortedRuns,
     removeChatRun: context.removeChatRun,
     agentRunSeq: context.agentRunSeq,
