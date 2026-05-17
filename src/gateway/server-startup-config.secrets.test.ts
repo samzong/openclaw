@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadAuthProfileStoreWithoutExternalProfiles } from "../agents/auth-profiles.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../config/types.js";
-import type { PreparedSecretsRuntimeSnapshot, SecretResolverWarning } from "../secrets/runtime.js";
+import {
+  createEmptySecretsRuntimeDiagnostics,
+  type PreparedSecretsRuntimeSnapshot,
+  type SecretResolverWarning,
+} from "../secrets/runtime.js";
 import { KNOWN_WEAK_GATEWAY_TOKEN_PLACEHOLDERS } from "./known-weak-gateway-secrets.js";
 import {
   createRuntimeSecretsActivator,
@@ -49,15 +53,18 @@ function preparedSnapshot(config: OpenClawConfig): PreparedSecretsRuntimeSnapsho
     warnings: [],
     webTools: {
       search: {
+        providerCount: 0,
         providerSource: "none",
         diagnostics: [],
       },
       fetch: {
+        providerCount: 0,
         providerSource: "none",
         diagnostics: [],
       },
       diagnostics: [],
     },
+    diagnostics: createEmptySecretsRuntimeDiagnostics(),
   };
 }
 
@@ -72,6 +79,7 @@ function callArg<T>(mock: { mock: { calls: unknown[][] } }, index = 0, _type?: (
 describe("gateway startup config secret preflight", () => {
   const previousSkipChannels = process.env.OPENCLAW_SKIP_CHANNELS;
   const previousSkipProviders = process.env.OPENCLAW_SKIP_PROVIDERS;
+  const previousStartupTrace = process.env.OPENCLAW_GATEWAY_STARTUP_TRACE;
 
   afterEach(() => {
     if (previousSkipChannels === undefined) {
@@ -83,6 +91,11 @@ describe("gateway startup config secret preflight", () => {
       delete process.env.OPENCLAW_SKIP_PROVIDERS;
     } else {
       process.env.OPENCLAW_SKIP_PROVIDERS = previousSkipProviders;
+    }
+    if (previousStartupTrace === undefined) {
+      delete process.env.OPENCLAW_GATEWAY_STARTUP_TRACE;
+    } else {
+      process.env.OPENCLAW_GATEWAY_STARTUP_TRACE = previousStartupTrace;
     }
   });
 
@@ -119,6 +132,65 @@ describe("gateway startup config secret preflight", () => {
       "config.auth.runtime-startup-overrides",
       "config.auth.secrets-activate",
     ]);
+  });
+
+  it("logs concise secrets startup trace aggregates when startup tracing is enabled", async () => {
+    process.env.OPENCLAW_GATEWAY_STARTUP_TRACE = "1";
+    const snapshot = preparedSnapshot(gatewayTokenConfig({}));
+    snapshot.diagnostics.prepare.totalMs = 12.3;
+    snapshot.diagnostics.prepare.authStoreLoadMs = 2;
+    snapshot.diagnostics.prepare.assignmentCount = 1;
+    snapshot.diagnostics.prepare.hasWebTools = true;
+    snapshot.diagnostics.prepare.webSearchProviderCount = 2;
+    const prepareRuntimeSecretsSnapshot = vi.fn(async () => snapshot);
+    const info = vi.fn();
+
+    await createRuntimeSecretsActivator({
+      logSecrets: {
+        info,
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+      emitStateEvent: vi.fn(),
+      prepareRuntimeSecretsSnapshot,
+      activateRuntimeSecretsSnapshot: vi.fn(),
+    })(gatewayTokenConfig({}), {
+      reason: "startup",
+      activate: true,
+    });
+
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining("startup trace: secrets.prepare totalMs=12.3"),
+    );
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("assignmentCount=1"));
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining("startup trace: secrets.webTools totalMs=0.0 searchProviderCount=2"),
+    );
+  });
+
+  it("skips secrets startup trace logging for startup preflight snapshots", async () => {
+    process.env.OPENCLAW_GATEWAY_STARTUP_TRACE = "1";
+    const snapshot = preparedSnapshot(gatewayTokenConfig({}));
+    const prepareRuntimeSecretsSnapshot = vi.fn(async () => snapshot);
+    const info = vi.fn();
+
+    await createRuntimeSecretsActivator({
+      logSecrets: {
+        info,
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+      emitStateEvent: vi.fn(),
+      prepareRuntimeSecretsSnapshot,
+      activateRuntimeSecretsSnapshot: vi.fn(),
+    })(gatewayTokenConfig({}), {
+      reason: "startup",
+      activate: false,
+    });
+
+    expect(info).not.toHaveBeenCalledWith(
+      expect.stringContaining("startup trace: secrets.prepare"),
+    );
   });
 
   it("wraps startup secret activation failures without emitting reload state events", async () => {

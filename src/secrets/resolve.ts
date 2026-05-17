@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -24,6 +25,7 @@ import {
   secretRefKey,
 } from "./ref-contract.js";
 import type { SecretRefResolveCache } from "./resolve-types.js";
+import { measureSecretsDiagnosticsSpan } from "./runtime-diagnostics.js";
 import { isNonEmptyString, isRecord, normalizePositiveInt } from "./shared.js";
 
 const DEFAULT_PROVIDER_CONCURRENCY = 4;
@@ -51,6 +53,23 @@ type ResolutionLimits = {
 };
 
 type ProviderResolutionOutput = Map<string, unknown>;
+
+function hashSecretProviderLabel(source: SecretRefSource, providerName: string): string {
+  return createHash("sha256")
+    .update(`${source}\0${providerName}`, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function classifySecretResolutionErrorScope(error: unknown): "provider" | "ref" | "unknown" {
+  if (error instanceof SecretProviderResolutionError) {
+    return "provider";
+  }
+  if (error instanceof SecretRefResolutionError) {
+    return "ref";
+  }
+  return "unknown";
+}
 
 export class SecretProviderResolutionError extends Error {
   readonly scope = "provider" as const;
@@ -849,22 +868,53 @@ export async function resolveSecretRefValues(
 
   const tasks = [...grouped.values()].map(
     (group) => async (): Promise<{ group: typeof group; values: ProviderResolutionOutput }> => {
-      if (group.refs.length > limits.maxRefsPerProvider) {
-        throw providerResolutionError({
-          source: group.source,
-          provider: group.providerName,
-          message: `Secret provider "${group.providerName}" exceeded maxRefsPerProvider (${limits.maxRefsPerProvider}).`,
-        });
-      }
-      const providerConfig = resolveConfiguredProvider(group.refs[0], options.config);
-      const values = await resolveProviderRefs({
-        refs: group.refs,
-        source: group.source,
-        providerName: group.providerName,
-        providerConfig,
-        options,
-        limits,
-      });
+      const providerHash = hashSecretProviderLabel(group.source, group.providerName);
+      const values = await measureSecretsDiagnosticsSpan(
+        {
+          name: "secrets.resolve.provider",
+          config: options.config,
+          env: options.env,
+          attributes: {
+            source: group.source,
+            providerHash,
+            refCount: group.refs.length,
+          },
+          successAttributes: () => ({ ok: true }),
+          errorAttributes: (error) => ({
+            ok: false,
+            errorScope: classifySecretResolutionErrorScope(error),
+          }),
+        },
+        async () => {
+          if (group.refs.length > limits.maxRefsPerProvider) {
+            throw providerResolutionError({
+              source: group.source,
+              provider: group.providerName,
+              message: `Secret provider "${group.providerName}" exceeded maxRefsPerProvider (${limits.maxRefsPerProvider}).`,
+            });
+          }
+          const providerConfig = resolveConfiguredProvider(group.refs[0], options.config);
+          const resolvedValues = await resolveProviderRefs({
+            refs: group.refs,
+            source: group.source,
+            providerName: group.providerName,
+            providerConfig,
+            options,
+            limits,
+          });
+          for (const ref of group.refs) {
+            if (!resolvedValues.has(ref.id)) {
+              throw refResolutionError({
+                source: group.source,
+                provider: group.providerName,
+                refId: ref.id,
+                message: `Secret provider "${group.providerName}" did not return id "${ref.id}".`,
+              });
+            }
+          }
+          return resolvedValues;
+        },
+      );
       return { group, values };
     },
   );
@@ -881,14 +931,6 @@ export async function resolveSecretRefValues(
   const resolved = new Map<string, unknown>();
   for (const result of taskResults.results) {
     for (const ref of result.group.refs) {
-      if (!result.values.has(ref.id)) {
-        throw refResolutionError({
-          source: result.group.source,
-          provider: result.group.providerName,
-          refId: ref.id,
-          message: `Secret provider "${result.group.providerName}" did not return id "${ref.id}".`,
-        });
-      }
       resolved.set(secretRefKey(ref), result.values.get(ref.id));
     }
   }

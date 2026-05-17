@@ -16,6 +16,7 @@ export type RuntimeWebDiagnostic = {
 
 export type RuntimeWebSearchMetadata = {
   providerConfigured?: string;
+  providerCount?: number;
   providerSource: "configured" | "auto-detect" | "none";
   selectedProvider?: string;
   selectedProviderKeySource?: "config" | "secretRef" | "env" | "missing";
@@ -25,6 +26,7 @@ export type RuntimeWebSearchMetadata = {
 
 export type RuntimeWebFetchMetadata = {
   providerConfigured?: string;
+  providerCount?: number;
   providerSource: "configured" | "auto-detect" | "none";
   selectedProvider?: string;
   selectedProviderKeySource?: "config" | "secretRef" | "env" | "missing";

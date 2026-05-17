@@ -42,6 +42,7 @@ type PrepareRuntimeSecretsSnapshot =
   typeof import("../secrets/runtime.js").prepareSecretsRuntimeSnapshot;
 type ActivateRuntimeSecretsSnapshot =
   typeof import("../secrets/runtime.js").activateSecretsRuntimeSnapshot;
+type PreparedSecretsRuntimeSnapshot = Awaited<ReturnType<PrepareRuntimeSecretsSnapshot>>;
 
 type GatewayStartupConfigOverrides = {
   auth?: GatewayAuthConfig;
@@ -55,6 +56,55 @@ export type GatewayStartupConfigSnapshotLoadResult = {
   wroteConfig: boolean;
   pluginMetadataSnapshot?: PluginMetadataSnapshot;
 };
+
+function formatStartupTraceMetric(key: string, value: number | string): string {
+  return `${key}=${typeof value === "number" ? value.toFixed(1) : value}`;
+}
+
+function formatStartupTraceMetrics(
+  metrics: ReadonlyArray<readonly [string, number | string]>,
+): string {
+  return metrics.map(([key, value]) => formatStartupTraceMetric(key, value)).join(" ");
+}
+
+function logSecretsStartupTrace(
+  prepared: PreparedSecretsRuntimeSnapshot,
+  logSecrets: GatewayStartupLog,
+): void {
+  if (!isTruthyEnvValue(process.env.OPENCLAW_GATEWAY_STARTUP_TRACE)) {
+    return;
+  }
+  const prepare = prepared.diagnostics.prepare;
+  logSecrets.info(
+    `startup trace: secrets.prepare ${formatStartupTraceMetrics([
+      ["totalMs", prepare.totalMs],
+      ["envMs", prepare.envMs],
+      ["cloneMs", prepare.cloneMs],
+      ["authStoreLoadMs", prepare.authStoreLoadMs],
+      ["fastPathCheckMs", prepare.fastPathCheckMs],
+      ["importRuntimePrepareMs", prepare.importRuntimePrepareMs],
+      ["loadablePluginOriginsMs", prepare.loadablePluginOriginsMs],
+      ["collectConfigAssignmentsMs", prepare.collectConfigAssignmentsMs],
+      ["collectAuthStoreAssignmentsMs", prepare.collectAuthStoreAssignmentsMs],
+      ["resolveSecretRefsMs", prepare.resolveSecretRefsMs],
+      ["applyAssignmentsMs", prepare.applyAssignmentsMs],
+      ["resolveWebToolsMs", prepare.resolveWebToolsMs],
+      ["candidateAgentDirCount", prepare.candidateAgentDirCount],
+      ["authStoreCount", prepare.authStoreCount],
+      ["assignmentCount", prepare.assignmentCount],
+      ["warningCount", prepare.warningCount],
+      ["hasWebToolsCount", prepare.hasWebTools ? 1 : 0],
+    ])}`,
+  );
+  logSecrets.info(
+    `startup trace: secrets.webTools ${formatStartupTraceMetrics([
+      ["totalMs", prepare.resolveWebToolsMs],
+      ["searchProviderCount", prepare.webSearchProviderCount],
+      ["fetchProviderCount", prepare.webFetchProviderCount],
+      ["diagnosticCount", prepare.webDiagnosticCount],
+    ])}`,
+  );
+}
 
 export async function loadGatewayStartupConfigSnapshot(params: {
   minimalTestGateway: boolean;
@@ -175,6 +225,7 @@ export function createRuntimeSecretsActivator(params: {
         assertRuntimeGatewayAuthNotKnownWeak(prepared.config);
         if (activationParams.activate) {
           activateRuntimeSecretsSnapshot(prepared);
+          logSecretsStartupTrace(prepared, params.logSecrets);
           logGatewayAuthSurfaceDiagnostics(prepared, params.logSecrets);
         }
         for (const warning of prepared.warnings) {

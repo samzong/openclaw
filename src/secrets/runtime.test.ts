@@ -56,6 +56,10 @@ describe("secrets runtime snapshot", () => {
     expect(ssh?.identityData).toBe("PRIVATE KEY");
     expect(ssh?.certificateData).toBe("SSH CERT");
     expect(ssh?.knownHostsData).toBe("example.com ssh-ed25519 AAAATEST");
+    expect(snapshot.diagnostics.prepare.assignmentCount).toBe(3);
+    expect(snapshot.diagnostics.prepare.authStoreCount).toBe(0);
+    expect(snapshot.diagnostics.prepare.warningCount).toBe(0);
+    expect(snapshot.diagnostics.prepare.webSearchProviderSource).toBe("none");
   });
 
   it("treats sandbox ssh secret refs as inactive when ssh backend is not selected", async () => {

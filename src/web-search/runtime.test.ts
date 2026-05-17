@@ -138,11 +138,15 @@ describe("web search runtime", () => {
   let runWebSearch: typeof import("./runtime.js").runWebSearch;
   let activateSecretsRuntimeSnapshot: typeof import("../secrets/runtime.js").activateSecretsRuntimeSnapshot;
   let clearSecretsRuntimeSnapshot: typeof import("../secrets/runtime.js").clearSecretsRuntimeSnapshot;
+  let createEmptySecretsRuntimeDiagnostics: typeof import("../secrets/runtime.js").createEmptySecretsRuntimeDiagnostics;
 
   beforeAll(async () => {
     ({ runWebSearch } = await import("./runtime.js"));
-    ({ activateSecretsRuntimeSnapshot, clearSecretsRuntimeSnapshot } =
-      await import("../secrets/runtime.js"));
+    ({
+      activateSecretsRuntimeSnapshot,
+      clearSecretsRuntimeSnapshot,
+      createEmptySecretsRuntimeDiagnostics,
+    } = await import("../secrets/runtime.js"));
   });
 
   beforeEach(() => {
@@ -312,6 +316,7 @@ describe("web search runtime", () => {
         },
         diagnostics: [],
       },
+      diagnostics: createEmptySecretsRuntimeDiagnostics(),
     });
 
     await expect(
@@ -421,6 +426,7 @@ describe("web search runtime", () => {
         },
         diagnostics: [],
       },
+      diagnostics: createEmptySecretsRuntimeDiagnostics(),
     });
 
     await expect(

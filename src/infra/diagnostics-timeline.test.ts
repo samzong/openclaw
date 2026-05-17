@@ -208,6 +208,74 @@ describe("diagnostics timeline", () => {
     expect(errorEvent.errorMessage).toBe("bad plugin");
   });
 
+  it("records extra end and error attributes without an error message when requested", async () => {
+    const { env, path } = await createTimelineEnv();
+
+    await expect(
+      measureDiagnosticsTimelineSpan("secrets.resolve.provider", () => "ok", {
+        env,
+        phase: "startup",
+        attributes: { source: "env" },
+        successAttributes: (result) => ({ ok: result === "ok" }),
+      }),
+    ).resolves.toBe("ok");
+    await expect(
+      measureDiagnosticsTimelineSpan(
+        "secrets.resolve.provider",
+        () => {
+          throw new Error("provider tenant-vault failed for SECRET_ID");
+        },
+        {
+          env,
+          phase: "startup",
+          attributes: { source: "exec" },
+          errorAttributes: () => ({ ok: false, errorScope: "provider" }),
+          omitErrorMessage: true,
+        },
+      ),
+    ).rejects.toThrow("provider tenant-vault failed");
+
+    const events = await readTimeline(path);
+    const successEnd = eventRecord(events, 1);
+    const errorEvent = eventRecord(events, 3);
+    expect(attributesRecord(successEnd)).toMatchObject({ source: "env", ok: true });
+    expect(errorEvent.type).toBe("span.error");
+    expect(attributesRecord(errorEvent)).toMatchObject({
+      source: "exec",
+      ok: false,
+      errorScope: "provider",
+    });
+    expect(errorEvent.errorName).toBe("Error");
+    expect(errorEvent.errorMessage).toBeUndefined();
+  });
+
+  it("does not fail measured work when span attribute callbacks fail", async () => {
+    const { env, path } = await createTimelineEnv();
+
+    await expect(
+      measureDiagnosticsTimelineSpan("secrets.resolve.provider", () => "ok", {
+        env,
+        attributes: { source: "env" },
+        successAttributes: () => {
+          throw new Error("attribute failure");
+        },
+      }),
+    ).resolves.toBe("ok");
+    expect(
+      measureDiagnosticsTimelineSpanSync("secrets.resolve.provider", () => 42, {
+        env,
+        attributes: { source: "file" },
+        successAttributes: () => {
+          throw new Error("sync attribute failure");
+        },
+      }),
+    ).toBe(42);
+
+    const events = await readTimeline(path);
+    expect(attributesRecord(eventRecord(events, 1))).toEqual({ source: "env" });
+    expect(attributesRecord(eventRecord(events, 3))).toEqual({ source: "file" });
+  });
+
   it("records synchronous spans", async () => {
     const { env, path } = await createTimelineEnv();
 

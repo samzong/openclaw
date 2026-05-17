@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/config.js";
-import { activateSecretsRuntimeSnapshot, clearSecretsRuntimeSnapshot } from "../secrets/runtime.js";
+import {
+  activateSecretsRuntimeSnapshot,
+  clearSecretsRuntimeSnapshot,
+  createEmptySecretsRuntimeDiagnostics,
+} from "../secrets/runtime.js";
 import { resolveOpenClawPluginToolsForOptions } from "./openclaw-plugin-tools.js";
 
 const hoisted = vi.hoisted(() => ({
@@ -266,6 +270,7 @@ describe("createOpenClawTools browser plugin integration", () => {
         },
         diagnostics: [],
       },
+      diagnostics: createEmptySecretsRuntimeDiagnostics(),
     });
 
     resolveOpenClawPluginToolsForOptions({

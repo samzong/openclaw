@@ -48,10 +48,16 @@ type DiagnosticsTimelineEvent = {
   signal?: string | null;
 };
 
-type DiagnosticsTimelineSpanOptions = {
+type DiagnosticsTimelineSpanOptions<T = unknown> = {
   phase?: string;
   parentSpanId?: string;
   attributes?: DiagnosticsTimelineAttributes;
+  successAttributes?: (result: T, durationMs: number) => DiagnosticsTimelineAttributes | undefined;
+  errorAttributes?: (
+    error: unknown,
+    durationMs: number,
+  ) => DiagnosticsTimelineAttributes | undefined;
+  omitErrorMessage?: boolean;
   config?: OpenClawConfig;
   env?: NodeJS.ProcessEnv;
 };
@@ -119,6 +125,32 @@ function normalizeAttributes(
     }
   }
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function mergeAttributes(
+  base: DiagnosticsTimelineAttributes | undefined,
+  extra: DiagnosticsTimelineAttributes | undefined,
+): DiagnosticsTimelineAttributes | undefined {
+  if (!base && !extra) {
+    return undefined;
+  }
+  return {
+    ...(base ?? {}),
+    ...(extra ?? {}),
+  };
+}
+
+function resolveSpanAttributes(
+  resolve: (() => DiagnosticsTimelineAttributes | undefined) | undefined,
+): DiagnosticsTimelineAttributes | undefined {
+  if (!resolve) {
+    return undefined;
+  }
+  try {
+    return resolve();
+  } catch {
+    return undefined;
+  }
 }
 
 function serializeTimelineEvent(event: DiagnosticsTimelineEvent, env: NodeJS.ProcessEnv): string {
@@ -194,7 +226,7 @@ export function getActiveDiagnosticsTimelineSpan(): ActiveDiagnosticsTimelineSpa
 export async function measureDiagnosticsTimelineSpan<T>(
   name: string,
   run: () => Promise<T> | T,
-  options: DiagnosticsTimelineSpanOptions = {},
+  options: DiagnosticsTimelineSpanOptions<T> = {},
 ): Promise<T> {
   const env = options.env ?? process.env;
   if (!isDiagnosticsTimelineEnabled({ config: options.config, env })) {
@@ -227,6 +259,7 @@ export async function measureDiagnosticsTimelineSpan<T>(
       },
       () => run(),
     );
+    const durationMs = performance.now() - startedAt;
     emitDiagnosticsTimelineEvent(
       {
         type: "span.end",
@@ -234,13 +267,17 @@ export async function measureDiagnosticsTimelineSpan<T>(
         phase,
         spanId,
         parentSpanId,
-        durationMs: performance.now() - startedAt,
-        attributes: options.attributes,
+        durationMs,
+        attributes: mergeAttributes(
+          options.attributes,
+          resolveSpanAttributes(() => options.successAttributes?.(result, durationMs)),
+        ),
       },
       { config: options.config, env },
     );
     return result;
   } catch (error) {
+    const durationMs = performance.now() - startedAt;
     emitDiagnosticsTimelineEvent(
       {
         type: "span.error",
@@ -248,10 +285,15 @@ export async function measureDiagnosticsTimelineSpan<T>(
         phase,
         spanId,
         parentSpanId,
-        durationMs: performance.now() - startedAt,
-        attributes: options.attributes,
+        durationMs,
+        attributes: mergeAttributes(
+          options.attributes,
+          resolveSpanAttributes(() => options.errorAttributes?.(error, durationMs)),
+        ),
         errorName: error instanceof Error ? error.name : typeof error,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        ...(options.omitErrorMessage
+          ? {}
+          : { errorMessage: error instanceof Error ? error.message : String(error) }),
       },
       { config: options.config, env },
     );
@@ -262,7 +304,7 @@ export async function measureDiagnosticsTimelineSpan<T>(
 export function measureDiagnosticsTimelineSpanSync<T>(
   name: string,
   run: () => T,
-  options: DiagnosticsTimelineSpanOptions = {},
+  options: DiagnosticsTimelineSpanOptions<T> = {},
 ): T {
   const env = options.env ?? process.env;
   if (!isDiagnosticsTimelineEnabled({ config: options.config, env })) {
@@ -295,6 +337,7 @@ export function measureDiagnosticsTimelineSpanSync<T>(
       },
       run,
     );
+    const durationMs = performance.now() - startedAt;
     emitDiagnosticsTimelineEvent(
       {
         type: "span.end",
@@ -302,13 +345,17 @@ export function measureDiagnosticsTimelineSpanSync<T>(
         phase,
         spanId,
         parentSpanId,
-        durationMs: performance.now() - startedAt,
-        attributes: options.attributes,
+        durationMs,
+        attributes: mergeAttributes(
+          options.attributes,
+          resolveSpanAttributes(() => options.successAttributes?.(result, durationMs)),
+        ),
       },
       { config: options.config, env },
     );
     return result;
   } catch (error) {
+    const durationMs = performance.now() - startedAt;
     emitDiagnosticsTimelineEvent(
       {
         type: "span.error",
@@ -316,10 +363,15 @@ export function measureDiagnosticsTimelineSpanSync<T>(
         phase,
         spanId,
         parentSpanId,
-        durationMs: performance.now() - startedAt,
-        attributes: options.attributes,
+        durationMs,
+        attributes: mergeAttributes(
+          options.attributes,
+          resolveSpanAttributes(() => options.errorAttributes?.(error, durationMs)),
+        ),
         errorName: error instanceof Error ? error.name : typeof error,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        ...(options.omitErrorMessage
+          ? {}
+          : { errorMessage: error instanceof Error ? error.message : String(error) }),
       },
       { config: options.config, env },
     );

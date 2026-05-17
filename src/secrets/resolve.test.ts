@@ -268,6 +268,52 @@ describe("secret ref resolver", () => {
     },
   );
 
+  it("emits provider timing diagnostics without raw provider or ref identifiers", async () => {
+    const timelinePath = path.join(fixtureRoot, `timeline-${caseId++}.jsonl`);
+    await resolveSecretRefValues(
+      [{ source: "env", provider: "tenant-acme-vault", id: "TENANT_SECRET_REF" }],
+      {
+        config: {
+          secrets: {
+            providers: {
+              "tenant-acme-vault": { source: "env" },
+            },
+          },
+        },
+        env: {
+          OPENCLAW_DIAGNOSTICS: "1",
+          OPENCLAW_DIAGNOSTICS_TIMELINE_PATH: timelinePath,
+          TENANT_SECRET_REF: "resolved-secret-value",
+        },
+      },
+    );
+
+    const rawTimeline = await fs.readFile(timelinePath, "utf8");
+    expect(rawTimeline).toContain('"name":"secrets.resolve.provider"');
+    expect(rawTimeline).not.toContain("tenant-acme-vault");
+    expect(rawTimeline).not.toContain("TENANT_SECRET_REF");
+    expect(rawTimeline).not.toContain("resolved-secret-value");
+    const events = rawTimeline
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            type: string;
+            phase?: string;
+            attributes?: Record<string, unknown>;
+          },
+      );
+    const end = events.find((event) => event.type === "span.end");
+    expect(end?.phase).toBeUndefined();
+    expect(end?.attributes).toMatchObject({
+      source: "env",
+      refCount: 1,
+      ok: true,
+    });
+    expect(typeof end?.attributes?.providerHash).toBe("string");
+  });
+
   itPosix("rejects symlink command paths unless allowSymlinkCommand is enabled", async () => {
     const root = await createCaseDir("exec-link-reject");
     const symlinkPath = path.join(root, "resolver-link.mjs");

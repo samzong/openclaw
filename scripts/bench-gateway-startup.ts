@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,12 +8,19 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 type GatewayBenchCase = {
+  authOverride?: string | null;
   config: Record<string, unknown>;
   env?: Record<string, string>;
   id: string;
   name: string;
   pluginActivationOnStartup?: boolean;
   pluginCount?: number;
+  setup?: (root: string) => GatewayBenchCaseFixture;
+};
+
+type GatewayBenchCaseFixture = {
+  config?: Record<string, unknown>;
+  env?: Record<string, string>;
 };
 
 type ProbeResult = {
@@ -33,6 +40,7 @@ type ProbeTransition = {
 type GatewaySample = {
   cpuCoreRatio: number | null;
   cpuMs: number | null;
+  diagnosticsTimeline: DiagnosticsTimelineEntry[];
   exitCode: number | null;
   firstOutputMs: number | null;
   gatewayReadyLogLine: string | null;
@@ -45,6 +53,15 @@ type GatewaySample = {
   readyz: ProbeResult;
   signal: string | null;
   startupTrace: Record<string, number>;
+};
+
+type DiagnosticsTimelineEntry = {
+  attributes?: Record<string, string | number | boolean | null>;
+  durationMs?: number;
+  errorName?: string;
+  name: string;
+  phase?: string;
+  type: string;
 };
 
 type SummaryStats = {
@@ -110,6 +127,61 @@ const BASE_CONFIG = {
   },
 } satisfies Record<string, unknown>;
 
+function envSecretRef(id: string): Record<string, string> {
+  return { source: "env", provider: "default", id };
+}
+
+function openAiBenchProvider(apiKey: unknown): Record<string, unknown> {
+  return {
+    baseUrl: "https://api.openai.com/v1",
+    models: [{ id: "gpt-5.5", name: "gpt-5.5" }],
+    apiKey,
+  };
+}
+
+function writeAuthProfileStore(
+  root: string,
+  agentId: string,
+  profiles: Record<string, Record<string, unknown>>,
+): void {
+  const agentDir = path.join(root, "state", "agents", agentId, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(
+    path.join(agentDir, "auth-profiles.json"),
+    `${JSON.stringify({ version: 1, profiles }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+function writeSlowExecResolver(root: string): {
+  allowInsecurePath?: boolean;
+  args?: string[];
+  command: string;
+} {
+  const scriptPath = path.join(root, "slow-secret-resolver.mjs");
+  writeFileSync(
+    scriptPath,
+    [
+      "const chunks = [];",
+      "for await (const chunk of process.stdin) chunks.push(chunk);",
+      "const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));",
+      "await new Promise((resolve) => setTimeout(resolve, 250));",
+      "const values = Object.fromEntries(request.ids.map((id) => [id, 'bench-secret-value']));",
+      "process.stdout.write(JSON.stringify({ protocolVersion: 1, values }));",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  if (process.platform !== "win32") {
+    const commandPath = path.join(root, "slow-secret-resolver");
+    writeFileSync(commandPath, `#!/bin/sh\nexec "${process.execPath}" "${scriptPath}"\n`, {
+      mode: 0o700,
+    });
+    return { command: commandPath };
+  }
+  return { allowInsecurePath: true, args: [scriptPath], command: process.execPath };
+}
+
 const GATEWAY_CASES: readonly GatewayBenchCase[] = [
   {
     id: "default",
@@ -165,6 +237,184 @@ const GATEWAY_CASES: readonly GatewayBenchCase[] = [
     pluginActivationOnStartup: false,
     pluginCount: 50,
     config: BASE_CONFIG,
+  },
+  {
+    id: "gatewayAuthEnvSecretRef",
+    name: "gateway auth env SecretRef",
+    authOverride: null,
+    env: { GATEWAY_TOKEN: "bench-gateway-token" },
+    config: {
+      ...BASE_CONFIG,
+      gateway: {
+        ...(BASE_CONFIG.gateway as Record<string, unknown>),
+        auth: { mode: "token", token: envSecretRef("GATEWAY_TOKEN") },
+      },
+      secrets: {
+        providers: {
+          default: { source: "env" },
+        },
+      },
+    },
+  },
+  {
+    id: "modelProviderEnvSecretRef",
+    name: "model provider env SecretRef",
+    env: { OPENAI_API_KEY: "bench-openai-key" },
+    config: {
+      ...BASE_CONFIG,
+      models: {
+        providers: {
+          openai: openAiBenchProvider(envSecretRef("OPENAI_API_KEY")),
+        },
+      },
+      secrets: {
+        providers: {
+          default: { source: "env" },
+        },
+      },
+    },
+  },
+  {
+    id: "authProfileKeyRef",
+    name: "auth profile keyRef",
+    env: { OPENAI_PROFILE_KEY: "bench-profile-key" },
+    config: BASE_CONFIG,
+    setup: (root) => {
+      writeAuthProfileStore(root, "main", {
+        "openai:default": {
+          type: "api_key",
+          provider: "openai",
+          keyRef: envSecretRef("OPENAI_PROFILE_KEY"),
+        },
+      });
+      return {};
+    },
+  },
+  {
+    id: "webSearchProvider",
+    name: "web search provider SecretRef",
+    env: { BRAVE_SEARCH_KEY: "bench-brave-key" },
+    config: {
+      ...BASE_CONFIG,
+      tools: {
+        web: {
+          search: {
+            provider: "brave",
+          },
+        },
+      },
+      plugins: {
+        ...(BASE_CONFIG.plugins as Record<string, unknown>),
+        entries: {
+          browser: { enabled: false },
+          brave: {
+            config: {
+              webSearch: {
+                apiKey: envSecretRef("BRAVE_SEARCH_KEY"),
+              },
+            },
+          },
+        },
+      },
+      secrets: {
+        providers: {
+          default: { source: "env" },
+        },
+      },
+    },
+  },
+  {
+    id: "fileSecretRef",
+    name: "file SecretRef",
+    config: BASE_CONFIG,
+    setup: (root) => {
+      const secretPath = path.join(root, "secrets", "bench-secrets.json");
+      mkdirSync(path.dirname(secretPath), { recursive: true });
+      writeFileSync(secretPath, `${JSON.stringify({ openai: { apiKey: "bench-file-key" } })}\n`, {
+        mode: 0o600,
+      });
+      return {
+        config: {
+          models: {
+            providers: {
+              openai: openAiBenchProvider({
+                source: "file",
+                provider: "benchfile",
+                id: "/openai/apiKey",
+              }),
+            },
+          },
+          secrets: {
+            providers: {
+              benchfile: { source: "file", path: secretPath, mode: "json" },
+            },
+          },
+        },
+      };
+    },
+  },
+  {
+    id: "slowExecSecretRef",
+    name: "slow exec SecretRef",
+    config: BASE_CONFIG,
+    setup: (root) => {
+      const resolver = writeSlowExecResolver(root);
+      return {
+        config: {
+          models: {
+            providers: {
+              openai: openAiBenchProvider({
+                source: "exec",
+                provider: "benchexec",
+                id: "openai/api-key",
+              }),
+            },
+          },
+          secrets: {
+            providers: {
+              benchexec: {
+                source: "exec",
+                command: resolver.command,
+                ...(resolver.args ? { args: resolver.args } : {}),
+                timeoutMs: 3000,
+                ...(resolver.allowInsecurePath ? { allowInsecurePath: true } : {}),
+              },
+            },
+          },
+        },
+      };
+    },
+  },
+  {
+    id: "multiAgentAuthProfiles",
+    name: "multi-agent auth profile stores",
+    env: {
+      MAIN_PROFILE_KEY: "bench-main-profile-key",
+      WORK_PROFILE_KEY: "bench-work-profile-key",
+      OPS_PROFILE_KEY: "bench-ops-profile-key",
+    },
+    config: {
+      ...BASE_CONFIG,
+      agents: {
+        list: [{ id: "main", default: true }, { id: "work" }, { id: "ops" }],
+      },
+    },
+    setup: (root) => {
+      for (const [agentId, envName] of [
+        ["main", "MAIN_PROFILE_KEY"],
+        ["work", "WORK_PROFILE_KEY"],
+        ["ops", "OPS_PROFILE_KEY"],
+      ] as const) {
+        writeAuthProfileStore(root, agentId, {
+          [`openai:${agentId}`]: {
+            type: "api_key",
+            provider: "openai",
+            keyRef: envSecretRef(envName),
+          },
+        });
+      }
+      return {};
+    },
   },
 ] as const;
 
@@ -560,14 +810,43 @@ function writePluginFixtures(
   return { pluginIds, pluginsDir };
 }
 
-function writeConfig(root: string, benchCase: GatewayBenchCase): string {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function mergeConfigObjects(
+  base: Record<string, unknown>,
+  override: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!override) {
+    return { ...base };
+  }
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const existing = merged[key];
+    merged[key] =
+      isPlainObject(existing) && isPlainObject(value) ? mergeConfigObjects(existing, value) : value;
+  }
+  return merged;
+}
+
+function prepareCaseFixture(root: string, benchCase: GatewayBenchCase): GatewayBenchCaseFixture {
+  return benchCase.setup?.(root) ?? {};
+}
+
+function writeConfig(
+  root: string,
+  benchCase: GatewayBenchCase,
+  fixtureConfig?: Record<string, unknown>,
+): string {
   const pluginFixtures = benchCase.pluginCount
     ? writePluginFixtures(root, benchCase.pluginCount, benchCase.pluginActivationOnStartup)
     : null;
+  const mergedCaseConfig = mergeConfigObjects(benchCase.config, fixtureConfig);
   const config = {
-    ...benchCase.config,
+    ...mergedCaseConfig,
     plugins: {
-      ...(benchCase.config.plugins as Record<string, unknown> | undefined),
+      ...(mergedCaseConfig.plugins as Record<string, unknown> | undefined),
       ...(pluginFixtures
         ? {
             load: { paths: [pluginFixtures.pluginsDir] },
@@ -585,6 +864,8 @@ function sanitizedEnv(
   root: string,
   configPath: string,
   benchCase: GatewayBenchCase,
+  diagnosticsTimelinePath: string,
+  fixtureEnv?: Record<string, string>,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     CI: process.env.CI ?? "1",
@@ -599,6 +880,8 @@ function sanitizedEnv(
     npm_config_update_notifier: "false",
     OPENCLAW_CONFIG: configPath,
     OPENCLAW_CONFIG_PATH: configPath,
+    OPENCLAW_DIAGNOSTICS: "timeline",
+    OPENCLAW_DIAGNOSTICS_TIMELINE_PATH: diagnosticsTimelinePath,
     OPENCLAW_GATEWAY_STARTUP_TRACE: "1",
     OPENCLAW_HOME: root,
     OPENCLAW_LOCAL_CHECK: "0",
@@ -606,8 +889,62 @@ function sanitizedEnv(
     OPENCLAW_STATE_DIR: path.join(root, "state"),
     OPENCLAW_TEST_DISABLE_UPDATE_CHECK: "1",
     ...benchCase.env,
+    ...fixtureEnv,
   };
   return env;
+}
+
+function isTimelineAttributeRecord(
+  value: unknown,
+): value is Record<string, string | number | boolean | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (entry) =>
+      typeof entry === "string" ||
+      typeof entry === "number" ||
+      typeof entry === "boolean" ||
+      entry === null,
+  );
+}
+
+function readSecretsDiagnosticsTimeline(pathname: string): DiagnosticsTimelineEntry[] {
+  if (!existsSync(pathname)) {
+    return [];
+  }
+  const entries: DiagnosticsTimelineEntry[] = [];
+  for (const line of readFileSync(pathname, "utf8").trim().split(/\r?\n/u)) {
+    if (!line) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      continue;
+    }
+    const event = parsed as Record<string, unknown>;
+    if (
+      typeof event.name !== "string" ||
+      !event.name.startsWith("secrets.") ||
+      (event.type !== "span.end" && event.type !== "span.error")
+    ) {
+      continue;
+    }
+    entries.push({
+      name: event.name,
+      type: String(event.type),
+      ...(typeof event.durationMs === "number" ? { durationMs: event.durationMs } : {}),
+      ...(typeof event.phase === "string" ? { phase: event.phase } : {}),
+      ...(typeof event.errorName === "string" ? { errorName: event.errorName } : {}),
+      ...(isTimelineAttributeRecord(event.attributes) ? { attributes: event.attributes } : {}),
+    });
+  }
+  return entries;
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<{
@@ -783,8 +1120,19 @@ async function runGatewaySample(options: {
 }): Promise<GatewaySample> {
   const root = mkdtempSync(path.join(tmpdir(), "openclaw-gateway-bench-"));
   const port = await getFreePort();
-  const configPath = writeConfig(root, options.benchCase);
-  const env = sanitizedEnv(root, configPath, options.benchCase);
+  const fixture = prepareCaseFixture(root, options.benchCase);
+  const configPath = writeConfig(root, options.benchCase, fixture.config);
+  const diagnosticsTimelinePath = path.join(
+    root,
+    `diagnostics-timeline-${options.benchCase.id}-${options.sampleIndex}.jsonl`,
+  );
+  const env = sanitizedEnv(
+    root,
+    configPath,
+    options.benchCase,
+    diagnosticsTimelinePath,
+    fixture.env,
+  );
   const startAt = performance.now();
   const deadlineAt = startAt + options.timeoutMs;
   const startupTrace: Record<string, number> = {};
@@ -814,8 +1162,9 @@ async function runGatewaySample(options: {
     String(port),
     "--bind",
     "loopback",
-    "--auth",
-    "none",
+    ...(options.benchCase.authOverride === null
+      ? []
+      : ["--auth", options.benchCase.authOverride ?? "none"]),
     "--tailscale",
     "off",
     "--allow-unconfigured",
@@ -893,11 +1242,13 @@ async function runGatewaySample(options: {
   clearInterval(rssTimer);
   sampleRss();
   await childExitPromise.catch(() => null);
+  const diagnosticsTimeline = readSecretsDiagnosticsTimeline(diagnosticsTimelinePath);
   rmSync(root, { force: true, maxRetries: 3, recursive: true, retryDelay: 100 });
 
   return {
     cpuCoreRatio,
     cpuMs,
+    diagnosticsTimeline,
     exitCode: exit.exitCode,
     firstOutputMs,
     gatewayReadyLogLine,
@@ -1021,6 +1372,8 @@ export const __testing = {
   classifyGatewayReadyLog,
   classifyProbeErrorKind,
   collectStartupTrace,
+  prepareCaseFixture,
+  readSecretsDiagnosticsTimeline,
   summarizeCase,
   waitForProbe,
   writeConfig,

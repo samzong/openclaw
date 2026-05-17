@@ -3,6 +3,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   activateSecretsRuntimeSnapshot,
   clearSecretsRuntimeSnapshot,
+  createEmptySecretsRuntimeDiagnostics,
   getActiveSecretsRuntimeSnapshot,
   type PreparedSecretsRuntimeSnapshot,
 } from "../secrets/runtime.js";
@@ -42,6 +43,7 @@ function createSnapshot(config: OpenClawConfig): PreparedSecretsRuntimeSnapshot 
       fetch: { providerSource: "none", diagnostics: [] },
       diagnostics: [],
     },
+    diagnostics: createEmptySecretsRuntimeDiagnostics(),
   };
 }
 

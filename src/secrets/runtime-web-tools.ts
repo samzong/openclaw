@@ -18,6 +18,7 @@ import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import { normalizeSecretInput } from "../utils/normalize-secret-input.js";
 import { secretRefKey } from "./ref-contract.js";
 import { resolveSecretRefValues } from "./resolve.js";
+import { measureSecretsDiagnosticsSpan } from "./runtime-diagnostics.js";
 import type { ResolverContext, SecretDefaults } from "./runtime-shared.js";
 import {
   ensureObject,
@@ -537,9 +538,40 @@ export async function resolveRuntimeWebTools(params: {
   resolvedConfig: OpenClawConfig;
   context: ResolverContext;
 }): Promise<RuntimeWebToolsMetadata> {
+  const env = { ...process.env, ...params.context.env };
+  return await measureSecretsDiagnosticsSpan(
+    {
+      name: "secrets.webTools.total",
+      config: params.sourceConfig,
+      env,
+      successAttributes: (metadata) => ({
+        hasSourceWeb: isRecord(params.sourceConfig.tools?.web),
+        hasPluginWebSearchConfig: hasPluginScopedWebToolConfig(params.sourceConfig, "webSearch"),
+        hasPluginWebFetchConfig: hasPluginScopedWebToolConfig(params.sourceConfig, "webFetch"),
+        searchProviderCount: metadata.search.providerCount ?? 0,
+        fetchProviderCount: metadata.fetch.providerCount ?? 0,
+        searchProviderSource: metadata.search.providerSource,
+        fetchProviderSource: metadata.fetch.providerSource,
+        diagnosticCount:
+          metadata.diagnostics.length +
+          metadata.search.diagnostics.length +
+          metadata.fetch.diagnostics.length,
+      }),
+    },
+    () => resolveRuntimeWebToolsMeasured(params, env),
+  );
+}
+
+async function resolveRuntimeWebToolsMeasured(
+  params: {
+    sourceConfig: OpenClawConfig;
+    resolvedConfig: OpenClawConfig;
+    context: ResolverContext;
+  },
+  env: NodeJS.ProcessEnv,
+): Promise<RuntimeWebToolsMetadata> {
   const defaults = params.sourceConfig.secrets?.defaults;
   const diagnostics: RuntimeWebDiagnostic[] = [];
-  const env = { ...process.env, ...params.context.env };
 
   const sourceTools = isRecord(params.sourceConfig.tools) ? params.sourceConfig.tools : undefined;
   const sourceWeb = isRecord(sourceTools?.web) ? sourceTools.web : undefined;
@@ -549,20 +581,46 @@ export async function resolveRuntimeWebTools(params: {
   const resolvedWeb = isRecord(resolvedTools?.web) ? resolvedTools.web : undefined;
   let hasCustomWebSearchRisk: Promise<boolean> | undefined;
   const getHasCustomWebSearchRisk = (): Promise<boolean> => {
-    hasCustomWebSearchRisk ??= hasCustomWebProviderPluginRisk({
-      contract: "webSearchProviders",
-      config: params.sourceConfig,
-      env,
-    });
+    hasCustomWebSearchRisk ??= measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.search.customRisk",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          hasSourceWeb: sourceWeb !== undefined,
+          hasPluginWebSearchConfig: hasPluginScopedWebToolConfig(params.sourceConfig, "webSearch"),
+        },
+        successAttributes: (hasCustomRisk) => ({ hasCustomRisk }),
+      },
+      () =>
+        hasCustomWebProviderPluginRisk({
+          contract: "webSearchProviders",
+          config: params.sourceConfig,
+          env,
+        }),
+    );
     return hasCustomWebSearchRisk;
   };
   let hasCustomWebFetchRisk: Promise<boolean> | undefined;
   const getHasCustomWebFetchRisk = (): Promise<boolean> => {
-    hasCustomWebFetchRisk ??= hasCustomWebProviderPluginRisk({
-      contract: "webFetchProviders",
-      config: params.sourceConfig,
-      env,
-    });
+    hasCustomWebFetchRisk ??= measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.fetch.customRisk",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          hasSourceWeb: sourceWeb !== undefined,
+          hasPluginWebFetchConfig: hasPluginScopedWebToolConfig(params.sourceConfig, "webFetch"),
+        },
+        successAttributes: (hasCustomRisk) => ({ hasCustomRisk }),
+      },
+      () =>
+        hasCustomWebProviderPluginRisk({
+          contract: "webFetchProviders",
+          config: params.sourceConfig,
+          env,
+        }),
+    );
     return hasCustomWebFetchRisk;
   };
   const legacyXSearchSource = isRecord(sourceWeb?.x_search) ? sourceWeb.x_search : undefined;
@@ -637,116 +695,153 @@ export async function resolveRuntimeWebTools(params: {
   }
   const searchMetadata: RuntimeWebSearchMetadata = {
     providerSource: "none",
+    providerCount: 0,
     diagnostics: [],
   };
   if (search || hasPluginWebSearchConfig) {
-    const searchSurface = await resolveRuntimeWebProviderSurface({
-      contract: "webSearchProviders",
-      rawProvider,
-      providerPath: "tools.web.search.provider",
-      toolConfig: search,
-      diagnostics,
-      metadataDiagnostics: searchMetadata.diagnostics,
-      invalidAutoDetectCode: "WEB_SEARCH_PROVIDER_INVALID_AUTODETECT",
-      sourceConfig: params.sourceConfig,
-      context: params.context,
-      configuredBundledPluginIdHint: configuredBundledWebSearchPluginIdHint,
-      resolveProviders: async ({ configuredBundledPluginId }) =>
-        resolveBundledWebSearchProviders({
+    const searchSurface = await measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.search.providerSurface",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          hasSourceWeb: sourceWeb !== undefined,
+          hasPluginWebSearchConfig,
+          configuredProvider: rawProvider || null,
+        },
+        successAttributes: (surface) => ({
+          providerCount: surface.providers.length,
+          configuredProvider: surface.configuredProvider ?? null,
+        }),
+      },
+      () =>
+        resolveRuntimeWebProviderSurface({
+          contract: "webSearchProviders",
+          rawProvider,
+          providerPath: "tools.web.search.provider",
+          toolConfig: search,
+          diagnostics,
+          metadataDiagnostics: searchMetadata.diagnostics,
+          invalidAutoDetectCode: "WEB_SEARCH_PROVIDER_INVALID_AUTODETECT",
           sourceConfig: params.sourceConfig,
           context: params.context,
-          configuredBundledPluginId,
-          hasCustomWebSearchPluginRisk: await getHasCustomWebSearchRisk(),
+          configuredBundledPluginIdHint: configuredBundledWebSearchPluginIdHint,
+          resolveProviders: async ({ configuredBundledPluginId }) =>
+            resolveBundledWebSearchProviders({
+              sourceConfig: params.sourceConfig,
+              context: params.context,
+              configuredBundledPluginId,
+              hasCustomWebSearchPluginRisk: await getHasCustomWebSearchRisk(),
+            }),
+          sortProviders: sortWebSearchProvidersForAutoDetect,
+          readConfiguredCredential: ({ provider, config, toolConfig }) =>
+            readConfiguredProviderCredential({
+              provider,
+              config,
+              search: toolConfig,
+            }),
+          readConfiguredCredentialFallback: ({ provider, config, toolConfig }) =>
+            readConfiguredProviderCredentialFallback({
+              provider,
+              config,
+              search: toolConfig,
+            }),
+          ignoreKeylessProvidersForConfiguredSurface: true,
+          emptyProvidersWhenSurfaceMissing: true,
+          normalizeConfiguredProviderAgainstActiveProviders: true,
         }),
-      sortProviders: sortWebSearchProvidersForAutoDetect,
-      readConfiguredCredential: ({ provider, config, toolConfig }) =>
-        readConfiguredProviderCredential({
-          provider,
-          config,
-          search: toolConfig,
-        }),
-      readConfiguredCredentialFallback: ({ provider, config, toolConfig }) =>
-        readConfiguredProviderCredentialFallback({
-          provider,
-          config,
-          search: toolConfig,
-        }),
-      ignoreKeylessProvidersForConfiguredSurface: true,
-      emptyProvidersWhenSurfaceMissing: true,
-      normalizeConfiguredProviderAgainstActiveProviders: true,
-    });
+    );
+    searchMetadata.providerCount = searchSurface.providers.length;
 
-    await resolveRuntimeWebProviderSelection({
-      scopePath: "tools.web.search",
-      toolConfig: search,
-      enabled: searchSurface.enabled,
-      providers: searchSurface.providers,
-      configuredProvider: searchSurface.configuredProvider,
-      metadata: searchMetadata,
-      diagnostics,
-      sourceConfig: params.sourceConfig,
-      resolvedConfig: params.resolvedConfig,
-      context: params.context,
-      defaults,
-      deferKeylessFallback: true,
-      fallbackUsedCode: "WEB_SEARCH_KEY_UNRESOLVED_FALLBACK_USED",
-      noFallbackCode: "WEB_SEARCH_KEY_UNRESOLVED_NO_FALLBACK",
-      autoDetectSelectedCode: "WEB_SEARCH_AUTODETECT_SELECTED",
-      readConfiguredCredential: ({ provider, config, toolConfig }) =>
-        readConfiguredProviderCredential({
-          provider,
-          config,
-          search: toolConfig,
+    await measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.search.providerSelection",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          providerCount: searchSurface.providers.length,
+          configuredProvider: searchSurface.configuredProvider ?? null,
+        },
+        successAttributes: () => ({
+          providerSource: searchMetadata.providerSource,
+          selectedProvider: searchMetadata.selectedProvider ?? null,
+          diagnosticCount: searchMetadata.diagnostics.length,
         }),
-      readConfiguredCredentialFallback: ({ provider, config, toolConfig }) =>
-        readConfiguredProviderCredentialFallback({
-          provider,
-          config,
-          search: toolConfig,
-        }),
-      resolveSecretInput: ({ value, path, envVars }) =>
-        resolveSecretInputWithEnvFallback({
+      },
+      () =>
+        resolveRuntimeWebProviderSelection({
+          scopePath: "tools.web.search",
+          toolConfig: search,
+          enabled: searchSurface.enabled,
+          providers: searchSurface.providers,
+          configuredProvider: searchSurface.configuredProvider,
+          metadata: searchMetadata,
+          diagnostics,
           sourceConfig: params.sourceConfig,
+          resolvedConfig: params.resolvedConfig,
           context: params.context,
           defaults,
-          value,
-          path,
-          envVars,
+          deferKeylessFallback: true,
+          fallbackUsedCode: "WEB_SEARCH_KEY_UNRESOLVED_FALLBACK_USED",
+          noFallbackCode: "WEB_SEARCH_KEY_UNRESOLVED_NO_FALLBACK",
+          autoDetectSelectedCode: "WEB_SEARCH_AUTODETECT_SELECTED",
+          readConfiguredCredential: ({ provider, config, toolConfig }) =>
+            readConfiguredProviderCredential({
+              provider,
+              config,
+              search: toolConfig,
+            }),
+          readConfiguredCredentialFallback: ({ provider, config, toolConfig }) =>
+            readConfiguredProviderCredentialFallback({
+              provider,
+              config,
+              search: toolConfig,
+            }),
+          resolveSecretInput: ({ value, path, envVars }) =>
+            resolveSecretInputWithEnvFallback({
+              sourceConfig: params.sourceConfig,
+              context: params.context,
+              defaults,
+              value,
+              path,
+              envVars,
+            }),
+          setResolvedCredential: ({ resolvedConfig, provider, value }) =>
+            setResolvedWebSearchApiKey({
+              resolvedConfig,
+              provider,
+              value,
+            }),
+          inactivePathsForProvider,
+          hasConfiguredSecretRef,
+          mergeRuntimeMetadata: async ({ provider, metadata, toolConfig, selectedResolution }) => {
+            if (!provider.resolveRuntimeMetadata) {
+              return;
+            }
+            Object.assign(
+              metadata,
+              await provider.resolveRuntimeMetadata({
+                config: params.sourceConfig,
+                searchConfig: toolConfig,
+                runtimeMetadata: metadata,
+                resolvedCredential: selectedResolution
+                  ? {
+                      value: selectedResolution.value,
+                      source: selectedResolution.source,
+                      fallbackEnvVar: selectedResolution.fallbackEnvVar,
+                    }
+                  : undefined,
+              }),
+            );
+          },
         }),
-      setResolvedCredential: ({ resolvedConfig, provider, value }) =>
-        setResolvedWebSearchApiKey({
-          resolvedConfig,
-          provider,
-          value,
-        }),
-      inactivePathsForProvider,
-      hasConfiguredSecretRef,
-      mergeRuntimeMetadata: async ({ provider, metadata, toolConfig, selectedResolution }) => {
-        if (!provider.resolveRuntimeMetadata) {
-          return;
-        }
-        Object.assign(
-          metadata,
-          await provider.resolveRuntimeMetadata({
-            config: params.sourceConfig,
-            searchConfig: toolConfig,
-            runtimeMetadata: metadata,
-            resolvedCredential: selectedResolution
-              ? {
-                  value: selectedResolution.value,
-                  source: selectedResolution.source,
-                  fallbackEnvVar: selectedResolution.fallbackEnvVar,
-                }
-              : undefined,
-          }),
-        );
-      },
-    });
+    );
   }
 
   const rawFetchProvider = normalizeLowercaseStringOrEmpty(fetch?.provider);
   const fetchMetadata: RuntimeWebFetchMetadata = {
     providerSource: "none",
+    providerCount: 0,
     diagnostics: [],
   };
   const discoverFetchProviders = needsRuntimeWebFetchProviderDiscovery({
@@ -756,93 +851,128 @@ export async function resolveRuntimeWebTools(params: {
     defaults,
   });
   if (discoverFetchProviders) {
-    const fetchSurface = await resolveRuntimeWebProviderSurface({
-      contract: "webFetchProviders",
-      rawProvider: rawFetchProvider,
-      providerPath: "tools.web.fetch.provider",
-      toolConfig: fetch,
-      diagnostics,
-      metadataDiagnostics: fetchMetadata.diagnostics,
-      invalidAutoDetectCode: "WEB_FETCH_PROVIDER_INVALID_AUTODETECT",
-      sourceConfig: params.sourceConfig,
-      context: params.context,
-      resolveProviders: async ({ configuredBundledPluginId }) =>
-        resolveBundledWebFetchProviders({
+    const fetchSurface = await measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.fetch.providerSurface",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          hasSourceWeb: sourceWeb !== undefined,
+          hasPluginWebFetchConfig,
+          configuredProvider: rawFetchProvider || null,
+        },
+        successAttributes: (surface) => ({
+          providerCount: surface.providers.length,
+          configuredProvider: surface.configuredProvider ?? null,
+        }),
+      },
+      () =>
+        resolveRuntimeWebProviderSurface({
+          contract: "webFetchProviders",
+          rawProvider: rawFetchProvider,
+          providerPath: "tools.web.fetch.provider",
+          toolConfig: fetch,
+          diagnostics,
+          metadataDiagnostics: fetchMetadata.diagnostics,
+          invalidAutoDetectCode: "WEB_FETCH_PROVIDER_INVALID_AUTODETECT",
           sourceConfig: params.sourceConfig,
           context: params.context,
-          configuredBundledPluginId,
-          hasCustomWebFetchPluginRisk: await getHasCustomWebFetchRisk(),
+          resolveProviders: async ({ configuredBundledPluginId }) =>
+            resolveBundledWebFetchProviders({
+              sourceConfig: params.sourceConfig,
+              context: params.context,
+              configuredBundledPluginId,
+              hasCustomWebFetchPluginRisk: await getHasCustomWebFetchRisk(),
+            }),
+          sortProviders: sortWebFetchProvidersForAutoDetect,
+          readConfiguredCredential: ({ provider, config, toolConfig }) =>
+            readConfiguredFetchProviderCredential({
+              provider,
+              config,
+              fetch: toolConfig,
+            }),
         }),
-      sortProviders: sortWebFetchProvidersForAutoDetect,
-      readConfiguredCredential: ({ provider, config, toolConfig }) =>
-        readConfiguredFetchProviderCredential({
-          provider,
-          config,
-          fetch: toolConfig,
-        }),
-    });
+    );
+    fetchMetadata.providerCount = fetchSurface.providers.length;
 
-    await resolveRuntimeWebProviderSelection({
-      scopePath: "tools.web.fetch",
-      toolConfig: fetch,
-      enabled: fetchSurface.enabled,
-      providers: fetchSurface.providers,
-      configuredProvider: fetchSurface.configuredProvider,
-      metadata: fetchMetadata,
-      diagnostics,
-      sourceConfig: params.sourceConfig,
-      resolvedConfig: params.resolvedConfig,
-      context: params.context,
-      defaults,
-      deferKeylessFallback: false,
-      fallbackUsedCode: "WEB_FETCH_PROVIDER_KEY_UNRESOLVED_FALLBACK_USED",
-      noFallbackCode: "WEB_FETCH_PROVIDER_KEY_UNRESOLVED_NO_FALLBACK",
-      autoDetectSelectedCode: "WEB_FETCH_AUTODETECT_SELECTED",
-      readConfiguredCredential: ({ provider, config, toolConfig }) =>
-        readConfiguredFetchProviderCredential({
-          provider,
-          config,
-          fetch: toolConfig,
+    await measureSecretsDiagnosticsSpan(
+      {
+        name: "secrets.webTools.fetch.providerSelection",
+        config: params.sourceConfig,
+        env,
+        attributes: {
+          providerCount: fetchSurface.providers.length,
+          configuredProvider: fetchSurface.configuredProvider ?? null,
+        },
+        successAttributes: () => ({
+          providerSource: fetchMetadata.providerSource,
+          selectedProvider: fetchMetadata.selectedProvider ?? null,
+          diagnosticCount: fetchMetadata.diagnostics.length,
         }),
-      resolveSecretInput: ({ value, path, envVars }) =>
-        resolveSecretInputWithEnvFallback({
+      },
+      () =>
+        resolveRuntimeWebProviderSelection({
+          scopePath: "tools.web.fetch",
+          toolConfig: fetch,
+          enabled: fetchSurface.enabled,
+          providers: fetchSurface.providers,
+          configuredProvider: fetchSurface.configuredProvider,
+          metadata: fetchMetadata,
+          diagnostics,
           sourceConfig: params.sourceConfig,
+          resolvedConfig: params.resolvedConfig,
           context: params.context,
           defaults,
-          value,
-          path,
-          envVars,
-          restrictEnvRefsToEnvVars: true,
+          deferKeylessFallback: false,
+          fallbackUsedCode: "WEB_FETCH_PROVIDER_KEY_UNRESOLVED_FALLBACK_USED",
+          noFallbackCode: "WEB_FETCH_PROVIDER_KEY_UNRESOLVED_NO_FALLBACK",
+          autoDetectSelectedCode: "WEB_FETCH_AUTODETECT_SELECTED",
+          readConfiguredCredential: ({ provider, config, toolConfig }) =>
+            readConfiguredFetchProviderCredential({
+              provider,
+              config,
+              fetch: toolConfig,
+            }),
+          resolveSecretInput: ({ value, path, envVars }) =>
+            resolveSecretInputWithEnvFallback({
+              sourceConfig: params.sourceConfig,
+              context: params.context,
+              defaults,
+              value,
+              path,
+              envVars,
+              restrictEnvRefsToEnvVars: true,
+            }),
+          setResolvedCredential: ({ resolvedConfig, provider, value }) =>
+            setResolvedWebFetchApiKey({
+              resolvedConfig,
+              provider,
+              value,
+            }),
+          inactivePathsForProvider: inactivePathsForFetchProvider,
+          hasConfiguredSecretRef,
+          mergeRuntimeMetadata: async ({ provider, metadata, toolConfig, selectedResolution }) => {
+            if (!provider.resolveRuntimeMetadata) {
+              return;
+            }
+            Object.assign(
+              metadata,
+              await provider.resolveRuntimeMetadata({
+                config: params.sourceConfig,
+                fetchConfig: toolConfig,
+                runtimeMetadata: metadata,
+                resolvedCredential: selectedResolution
+                  ? {
+                      value: selectedResolution.value,
+                      source: selectedResolution.source,
+                      fallbackEnvVar: selectedResolution.fallbackEnvVar,
+                    }
+                  : undefined,
+              }),
+            );
+          },
         }),
-      setResolvedCredential: ({ resolvedConfig, provider, value }) =>
-        setResolvedWebFetchApiKey({
-          resolvedConfig,
-          provider,
-          value,
-        }),
-      inactivePathsForProvider: inactivePathsForFetchProvider,
-      hasConfiguredSecretRef,
-      mergeRuntimeMetadata: async ({ provider, metadata, toolConfig, selectedResolution }) => {
-        if (!provider.resolveRuntimeMetadata) {
-          return;
-        }
-        Object.assign(
-          metadata,
-          await provider.resolveRuntimeMetadata({
-            config: params.sourceConfig,
-            fetchConfig: toolConfig,
-            runtimeMetadata: metadata,
-            resolvedCredential: selectedResolution
-              ? {
-                  value: selectedResolution.value,
-                  source: selectedResolution.source,
-                  fallbackEnvVar: selectedResolution.fallbackEnvVar,
-                }
-              : undefined,
-          }),
-        );
-      },
-    });
+    );
   }
 
   return {

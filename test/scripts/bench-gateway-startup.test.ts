@@ -41,6 +41,8 @@ describe("gateway startup benchmark script", () => {
     expect(result.stdout).toContain("--case <id>");
     expect(result.stdout).toContain("--cpu-prof-dir <dir>");
     expect(result.stdout).toContain("default (gateway default)");
+    expect(result.stdout).toContain("gatewayAuthEnvSecretRef (gateway auth env SecretRef)");
+    expect(result.stdout).toContain("slowExecSecretRef (slow exec SecretRef)");
     expect(result.stdout).not.toContain("[gateway-startup-bench]");
     expect(result.stderr).toBe("");
   });
@@ -105,6 +107,74 @@ describe("gateway startup benchmark script", () => {
     expect(startupTrace["sidecars.acp.runtime-ready.readyCount"]).toBe(1);
   });
 
+  it("collects secrets startup trace aggregate metrics", () => {
+    const startupTrace: Record<string, number> = {};
+
+    __testing.collectStartupTrace(
+      "[gateway] startup trace: secrets.prepare totalMs=12.3 authStoreLoadMs=2.0 assignmentCount=3 hasWebToolsCount=1",
+      startupTrace,
+    );
+    __testing.collectStartupTrace(
+      "[gateway] startup trace: secrets.webTools totalMs=4.5 searchProviderCount=2 diagnosticCount=1",
+      startupTrace,
+    );
+
+    expect(startupTrace["secrets.prepare.totalMs"]).toBe(12.3);
+    expect(startupTrace["secrets.prepare.authStoreLoadMs"]).toBe(2);
+    expect(startupTrace["secrets.prepare.assignmentCount"]).toBe(3);
+    expect(startupTrace["secrets.prepare.hasWebToolsCount"]).toBe(1);
+    expect(startupTrace["secrets.webTools.totalMs"]).toBe(4.5);
+    expect(startupTrace["secrets.webTools.searchProviderCount"]).toBe(2);
+    expect(startupTrace["secrets.webTools.diagnosticCount"]).toBe(1);
+  });
+
+  it("reads sanitized secrets diagnostics timeline entries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-bench-timeline-test-"));
+    try {
+      const timelinePath = path.join(root, "timeline.jsonl");
+      fs.writeFileSync(
+        timelinePath,
+        [
+          JSON.stringify({
+            type: "span.end",
+            name: "secrets.resolve.provider",
+            phase: "startup",
+            durationMs: 253.4,
+            attributes: {
+              source: "exec",
+              providerHash: "abcd1234",
+              refCount: 1,
+              ok: true,
+            },
+          }),
+          JSON.stringify({
+            type: "span.end",
+            name: "plugins.metadata.scan",
+            durationMs: 5,
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      expect(__testing.readSecretsDiagnosticsTimeline(timelinePath)).toEqual([
+        {
+          attributes: {
+            source: "exec",
+            providerHash: "abcd1234",
+            refCount: 1,
+            ok: true,
+          },
+          durationMs: 253.4,
+          name: "secrets.resolve.provider",
+          phase: "startup",
+          type: "span.end",
+        },
+      ]);
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it("records probe state transitions, first error kind, and first recovery", async () => {
     let calls = 0;
     const { port, server } = await listenOnLoopback((_req, res) => {
@@ -158,6 +228,48 @@ describe("gateway startup benchmark script", () => {
       expect(manifest.activation?.onStartup).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("merges benchmark case setup config and env into the generated config", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-bench-config-test-"));
+    try {
+      const fixture = __testing.prepareCaseFixture(root, {
+        config: {
+          gateway: { mode: "local" },
+        },
+        id: "fixture",
+        name: "fixture",
+        setup: () => ({
+          config: {
+            gateway: { auth: { mode: "token", token: "bench-token" } },
+            models: { providers: { openai: { apiKey: "bench-key" } } },
+          },
+          env: { BENCH_EXTRA: "1" },
+        }),
+      });
+      const configPath = __testing.writeConfig(
+        root,
+        {
+          config: {
+            gateway: { mode: "local" },
+          },
+          id: "fixture",
+          name: "fixture",
+        },
+        fixture.config,
+      );
+      const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+        gateway?: { auth?: { token?: string }; mode?: string };
+        models?: { providers?: { openai?: { apiKey?: string } } };
+      };
+
+      expect(fixture.env).toEqual({ BENCH_EXTRA: "1" });
+      expect(config.gateway?.mode).toBe("local");
+      expect(config.gateway?.auth?.token).toBe("bench-token");
+      expect(config.models?.providers?.openai?.apiKey).toBe("bench-key");
+    } finally {
+      fs.rmSync(root, { force: true, recursive: true });
     }
   });
 
